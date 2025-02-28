@@ -28,6 +28,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
 
     // Roles
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+    bytes32 public constant PRICE_SETTER_ROLE = keccak256("PRICE_SETTER_ROLE");
     
     // Constants
     uint256 public constant EXPO = 1_000_000;
@@ -84,7 +85,9 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         uint256 userReward,
         uint256 treasuryReward,
         uint256 lossAmount,
-        uint256 price
+        uint256 price,
+        uint256 rewardedAmount,
+        uint256 loss
     );
     event TotalAmountUpdated(uint256 newTotalAmount);
     event CurrencyBorrowed(address indexed borrower, uint256 amount);
@@ -114,6 +117,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         // Setup roles
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(OPERATOR_ROLE, msg.sender);
+        _grantRole(PRICE_SETTER_ROLE, msg.sender);
 
         // Initialize reward configurations
         rewardConfigs.push(RewardConfig({weight: 100, duration: 0}));
@@ -126,21 +130,28 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         _grantRole(OPERATOR_ROLE, operator);
     }
 
-    // Function to update price (only operator)
-    function setPrice(uint256 _newPrice, uint256 _rewardAmount) external onlyRole(OPERATOR_ROLE) {
+    // Function to grant price setter role (only admin)
+    function grantPriceSetterRole(address priceSetter) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _grantRole(PRICE_SETTER_ROLE, priceSetter);
+    }
+
+    // Function to update price (only price setter)
+    function setPrice(uint256 _newPrice) external onlyRole(PRICE_SETTER_ROLE) {
         if (_newPrice == 0) revert ZeroPrice();
-        
-        // Transfer reward tokens from operator to contract if reward amount is provided
-        if (_rewardAmount > 0) {
-            IERC20(rewardToken).transferFrom(msg.sender, address(this), _rewardAmount);
-            uint256 oldRewardsAmount = totalRewardsAdded;
-            totalRewardsAdded += _rewardAmount;
-            emit TotalRewardsUpdated(oldRewardsAmount, totalRewardsAdded);
-        }
         
         uint256 oldPrice = price;
         price = _newPrice;
-        emit PriceUpdated(oldPrice, _newPrice, _rewardAmount);
+        emit PriceUpdated(oldPrice, _newPrice, 0);
+    }
+
+    // Function to add rewards (anyone can add)
+    function addReward(uint256 _rewardAmount) external {
+        if (_rewardAmount == 0) revert ZeroAmount();
+        
+        IERC20(rewardToken).transferFrom(msg.sender, address(this), _rewardAmount);
+        uint256 oldRewardsAmount = totalRewardsAdded;
+        totalRewardsAdded += _rewardAmount;
+        emit TotalRewardsUpdated(oldRewardsAmount, totalRewardsAdded);
     }
 
     // Function to update currency address (only owner)
@@ -279,7 +290,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         treasuryReward = totalReward - userReward;
         
         // Update rewarded amount for the proportional amount
-        position.rewardedAmount += userReward;
+        position.rewardedAmount += totalReward;
         
         // Transfer rewards
         uint256 oldHarvestedAmount = totalRewardsHarvested;
@@ -333,9 +344,10 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         
         // Calculate amount to return and loss if price < entryPrice
         amountToReturn = _amount;
+        uint256 loss = 0;
         if (price < position.entryPrice) {
             uint256 priceDiff = position.entryPrice - price;
-            uint256 loss = (_amount * priceDiff) / (100 * EXPO);
+            loss = (_amount * priceDiff) / (100 * EXPO);
             position.lossAmount += loss;
             amountToReturn = _amount - loss;
         }
@@ -348,15 +360,47 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         if (_amount == position.remainingAmount) {
             position.closedAt = block.timestamp;
             position.outPrice = price;
+            position.remainingAmount = 0;
             _burn(_tokenId);
-            emit PositionReduced(msg.sender, _tokenId, _amount, 0, totalReward, weight, userReward, treasuryReward, position.lossAmount, price);
+            _emitPositionReduced(_tokenId, _amount, 0, totalReward, weight, userReward, treasuryReward, position.lossAmount, position.rewardedAmount, loss);
         } else {
             // Update position amount
             position.remainingAmount -= _amount;
-            emit PositionReduced(msg.sender, _tokenId, _amount, position.remainingAmount, totalReward, weight, userReward, treasuryReward, position.lossAmount, price);
+            _emitPositionReduced(_tokenId, _amount, position.remainingAmount, totalReward, weight, userReward, treasuryReward, position.lossAmount, position.rewardedAmount, loss);
         }
 
         return amountToReturn;
+    }
+
+    /**
+     * @notice Helper function to emit PositionReduced event to avoid stack too deep errors
+     */
+    function _emitPositionReduced(
+        uint256 _tokenId,
+        uint256 _reducedAmount,
+        uint256 _remainingAmount,
+        uint256 _totalReward,
+        uint256 _weight,
+        uint256 _userReward,
+        uint256 _treasuryReward,
+        uint256 _lossAmount,
+        uint256 _rewardedAmount,
+        uint256 _loss
+    ) private {
+        emit PositionReduced(
+            msg.sender,
+            _tokenId,
+            _reducedAmount,
+            _remainingAmount,
+            _totalReward,
+            _weight,
+            _userReward,
+            _treasuryReward,
+            _lossAmount,
+            price,
+            _rewardedAmount,
+            _loss
+        );
     }
 
     /**
