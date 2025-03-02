@@ -17,8 +17,15 @@ async function main() {
   const SeedRoundFundraiser = await ethers.getContractFactory(
     "SeedRoundFundraiser"
   );
+
+  const fundraiserAddress = process.env.FUNDRAISER_ADDRESS!;
+  if (!fundraiserAddress) {
+    console.error("FUNDRAISER_ADDRESS is not set in the .env file");
+    return;
+  }
+
   const fundraiser = SeedRoundFundraiser.attach(
-    process.env.FUNDRAISER_ADDRESS!
+    fundraiserAddress
   ) as SeedRoundFundraiser;
 
   console.log(`Adding ${tokensData.tokens.length} tokens to whitelist...`);

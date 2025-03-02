@@ -189,10 +189,7 @@
     "@wagmi/core": "^2.16.3"
   },
   "scripts": {
-    "deploy:seed-round-fundraiser": "npx hardhat run deploys/deploy.ts --network sepolia",
-    "deploy:seed-round-fundraiser:sepolia": "npx hardhat run deploys/deploy.ts --network sepolia",
-    "deploy:seed-round-fundraiser:base-sepolia": "npx hardhat run deploys/deploy.ts --network base-sepolia",
-    "deploy:seed-round-fundraiser:base": "npx hardhat run deploys/deploy.ts --network base"
+    "test": "npx hardhat test"
   },
   "keywords": [],
   "author": "",

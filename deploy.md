@@ -25,25 +25,21 @@
 
 1. Run the following command to deploy the Seed Round Fundraiser to Sepolia:
    ```bash
-   npm run deploy:seed-round-fundraiser
-   ```
-   or
-   ```bash
-   npm run deploy:seed-round-fundraiser:sepolia
+   npx hardhat run scripts/01-deploy.ts --network sepolia
    ```
 
 ### Base Sepolia Network
 
 1. Run the following command to deploy the Seed Round Fundraiser to Base Sepolia:
    ```bash
-   npm run deploy:seed-round-fundraiser:base-sepolia
+   npx hardhat run scripts/01-deploy.ts --network base-sepolia
    ```
 
 ### Base Mainnet
 
 1. Run the following command to deploy the Seed Round Fundraiser to Base Mainnet:
    ```bash
-   npm run deploy:seed-round-fundraiser:base
+   npx hardhat run scripts/01-deploy.ts --network base
    ```
 
 2. After successful deployment, the contract address will be displayed in the terminal.
@@ -67,9 +63,44 @@ npx hardhat verify --network base-sepolia <contract_address>
 npx hardhat verify --network base <contract_address>
 ```
 
+## Adding Whitelisted Tokens
+
+After deploying the contract, you can add whitelisted tokens that will be accepted for fundraising:
+
+1. Create a `tokens.json` file in the root directory with the following format:
+   ```json
+   {
+     "tokens": [
+       {
+         "address": "0x...",
+         "price": "1.5"
+       },
+       {
+         "address": "0x...",
+         "price": "2.0"
+       }
+     ]
+   }
+   ```
+   - `address`: The token contract address
+   - `price`: The token price in USD (with decimal precision)
+
+2. Add the deployed contract address to your `.env` file:
+   ```
+   FUNDRAISER_ADDRESS=<deployed fundraiser contract address>
+   ```
+
+3. Run the script to add whitelisted tokens:
+   ```bash
+   npx hardhat run scripts/02-addWhitelistedTokens.ts --network <network-name>
+   ```
+   Replace `<network-name>` with the appropriate network (sepolia, base-sepolia, or base).
+
+4. The script will process tokens in batches and display the progress in the console.
+
 ## Notes
 
 - Ensure the deployment wallet has sufficient ETH to pay for gas fees.
 - The PROJECT_TOKEN address must be a valid project token address.
 - The OWNER_ADDRESS will have administrative rights to the contract after deployment.
-- You can deploy to different networks by using the appropriate script command or by specifying the network flag manually: `npx hardhat run deploys/deploy.ts --network <network-name>`
+- You can deploy to different networks by using the appropriate network flag: `npx hardhat run scripts/01-deploy.ts --network <network-name>`
