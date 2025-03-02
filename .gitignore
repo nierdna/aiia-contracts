@@ -5,3 +5,5 @@ artifacts
 cache
 
 typechain-types
+
+.env

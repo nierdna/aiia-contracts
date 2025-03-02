@@ -7,6 +7,10 @@ import "@openzeppelin/hardhat-upgrades";
 
 dotenv.config();
 
+const pks: string[] = [process.env.PRIVATE_KEY].filter(
+  (pk) => pk !== undefined
+) as string[];
+
 const config: HardhatUserConfig = {
   solidity: {
     version: "0.8.28",
@@ -23,17 +27,21 @@ const config: HardhatUserConfig = {
       url:
         process.env.SEPOLIA_RPC_URL ||
         "https://sepolia.infura.io/v3/YOUR-PROJECT-ID",
-      accounts:
-        process.env.PRIVATE_KEY !== undefined
-          ? [process.env.PRIVATE_KEY, process.env.OPERATOR_PRIVATE_KEY!].filter(
-              Boolean
-            )
-          : [],
+      accounts: pks,
+    },
+    "base-sepolia": {
+      url: process.env.BASE_SEPOLIA_RPC_URL || "",
+      accounts: pks,
+    },
+    base: {
+      url: process.env.BASE_RPC_URL || "",
+      accounts: pks,
     },
   },
   etherscan: {
     apiKey: {
       sepolia: process.env.ETHERSCAN_API_KEY || "",
+      baseSepolia: process.env.BASE_SEPOLIA_API_KEY || "",
     },
   },
 };
