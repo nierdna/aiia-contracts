@@ -263,7 +263,7 @@ contract SeedRoundFundraiser is Initializable, OwnableUpgradeable, AccessControl
             ended: false,
             claimingEnabled: false,
             refundEnabled: false,
-            allowMultiRoundParticipation: true
+            allowMultiRoundParticipation: false
         });
         
         totalRounds++;
