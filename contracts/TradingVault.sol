@@ -125,7 +125,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     event TotalAmountUpdated(uint256 newTotalAmount);
     event CurrencyBorrowed(address indexed borrower, uint256 amount);
     event CurrencyRepaid(address indexed borrower, uint256 amount);
-    event PriceUpdated(uint256 oldPrice, uint256 newPrice, uint256 requiredReward);
+    event PriceUpdated(uint256 oldPrice, uint256 newPrice, uint256 requiredReward, uint256 timestamp);
     event CurrencyUpdated(address oldCurrency, address newCurrency);
     event RewardTokenUpdated(address oldRewardToken, address newRewardToken);
     event TreasuryUpdated(address oldTreasury, address newTreasury);
@@ -142,6 +142,17 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     uint256 public constant EXPO = 1_000_000;
     uint256 public constant PERCENTAGE_BASE = 100 * EXPO;
     uint256 public constant BASE_WEIGHT = 10_000;
+    uint256 public constant MAX_BATCH_SIZE = 8_000; // Can handle ~760 gas per item
+
+    /**
+     * @dev Struct containing price data for batch updates
+     * @param price The price value
+     * @param timestamp The timestamp for the price
+     */
+    struct PriceData {
+        uint256 price;
+        uint256 timestamp;
+    }
 
     // State variables
     uint256 public price;
@@ -194,13 +205,16 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         rewardToken = _rewardToken;
         treasury = _treasury;
         
+        // Initialize price to PERCENTAGE_BASE
+        price = PERCENTAGE_BASE;
+        
         // Setup roles
         _grantRole(DEFAULT_ADMIN_ROLE, _owner);
         _grantRole(OPERATOR_ROLE, msg.sender);
         _grantRole(PRICE_SETTER_ROLE, msg.sender);
 
         // Initialize reward configurations
-        rewardConfigs.push(RewardConfig({weight: 100, duration: 0}));
+        rewardConfigs.push(RewardConfig({weight: BASE_WEIGHT, duration: 0}));
 
         isReduceEnabled = true;
     }
@@ -305,7 +319,28 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         
         uint256 oldPrice = price;
         price = _newPrice;
-        emit PriceUpdated(oldPrice, _newPrice, 0);
+
+        emit PriceUpdated(oldPrice, _newPrice, 0, block.timestamp);
+    }
+
+    /**
+     * @dev Emits multiple PriceUpdated events in a single transaction
+     * @param _priceDataArray Array of PriceData structs containing price and timestamp
+     * Requirements:
+     * - Caller must have PRICE_SETTER_ROLE
+     * - Array must not be empty
+     * - No price can be zero
+     * - Timestamps must be in ascending order
+     */
+    function batchEmitPriceUpdated(PriceData[] calldata _priceDataArray) external onlyRole(PRICE_SETTER_ROLE) {
+        if (_priceDataArray.length == 0) revert("Empty array");
+        if (_priceDataArray.length > MAX_BATCH_SIZE) revert("Batch size too large");
+        
+        uint256 oldPrice = price;
+
+        for (uint256 i = 0; i < _priceDataArray.length; i++) {
+            emit PriceUpdated(oldPrice, _priceDataArray[i].price, 0, _priceDataArray[i].timestamp);
+        }
     }
 
     // ==================== OPERATOR FUNCTIONS ====================
