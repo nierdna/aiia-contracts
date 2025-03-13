@@ -5,6 +5,7 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /**
  * @title SeedRoundFundraiser
@@ -40,12 +41,14 @@ contract SeedRoundFundraiser is Initializable, OwnableUpgradeable, AccessControl
     error AlreadyRefunded();
     error InvalidEthAmount();
     error EthTransferFailed();
+    error InvalidTokenDecimals();
 
     // Structs
     // Whitelisted token struct
     struct WhitelistedToken {
         bool isWhitelisted;
         uint256 price; // Price in USD with PRICE_PRECISION decimals
+        uint8 decimals; // Token decimals
     }
 
     // Round configuration struct
@@ -94,7 +97,7 @@ contract SeedRoundFundraiser is Initializable, OwnableUpgradeable, AccessControl
     uint256[50] private __gap;
 
     // Events
-    event TokenWhitelisted(address indexed token, uint256 price);
+    event TokenWhitelisted(address indexed token, uint256 price, uint8 decimals);
     event TokenPriceUpdated(address indexed token, uint256 oldPrice, uint256 newPrice);
     event TokenRemovedFromWhitelist(address indexed token);
     event RoundCreated(uint256 indexed roundId, uint256 startTime, uint256 endTime, uint256 targetFund, uint256 totalAllocation, uint256 maxFundPerAccount);
@@ -174,12 +177,23 @@ contract SeedRoundFundraiser is Initializable, OwnableUpgradeable, AccessControl
         if (_token != ETH_ADDRESS && _token == address(0)) revert InvalidTokenAddress();
         if (_price == 0) revert InvalidTokenPrice();
         
+        // Get token decimals (ETH has 18 decimals)
+        uint8 decimals = 18;
+        if (_token != ETH_ADDRESS) {
+            try IERC20Metadata(_token).decimals() returns (uint8 tokenDecimals) {
+                decimals = tokenDecimals;
+            } catch {
+                revert InvalidTokenDecimals();
+            }
+        }
+        
         whitelistedTokens[_token] = WhitelistedToken({
             isWhitelisted: true,
-            price: _price
+            price: _price,
+            decimals: decimals
         });
         
-        emit TokenWhitelisted(_token, _price);
+        emit TokenWhitelisted(_token, _price, decimals);
     }
 
     /**
@@ -192,7 +206,14 @@ contract SeedRoundFundraiser is Initializable, OwnableUpgradeable, AccessControl
         if (_newPrice == 0) revert InvalidTokenPrice();
         
         uint256 oldPrice = whitelistedTokens[_token].price;
-        whitelistedTokens[_token].price = _newPrice;
+        // Preserve the token's decimals when updating the price
+        uint8 tokenDecimals = whitelistedTokens[_token].decimals;
+        
+        whitelistedTokens[_token] = WhitelistedToken({
+            isWhitelisted: true,
+            price: _newPrice,
+            decimals: tokenDecimals
+        });
         
         emit TokenPriceUpdated(_token, oldPrice, _newPrice);
     }
@@ -242,7 +263,7 @@ contract SeedRoundFundraiser is Initializable, OwnableUpgradeable, AccessControl
             ended: false,
             claimingEnabled: false,
             refundEnabled: false,
-            allowMultiRoundParticipation: true
+            allowMultiRoundParticipation: false
         });
         
         totalRounds++;
@@ -367,9 +388,14 @@ contract SeedRoundFundraiser is Initializable, OwnableUpgradeable, AccessControl
             }
         }
         
-        // Calculate fund amount in USD
+        // Calculate fund amount in USD, accounting for token decimals
         uint256 tokenPrice = whitelistedTokens[_token].price;
-        uint256 fundAmount = (amount * tokenPrice) / PRICE_PRECISION;
+        uint8 tokenDecimals = whitelistedTokens[_token].decimals;
+        
+        // Unified calculation for all token decimals
+        // This approach normalizes all token amounts to 18 decimals before applying the price
+        // It works for any token decimal value without conditional branching
+        uint256 fundAmount = (amount * tokenPrice) / (10**tokenDecimals);
         
         // Check if contribution exceeds max fund per account
         UserContribution storage userContrib = userContributions[_roundId][msg.sender];
