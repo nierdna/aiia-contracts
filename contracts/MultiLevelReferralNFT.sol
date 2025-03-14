@@ -237,6 +237,48 @@ contract NFTTicket is Initializable, ERC721Upgradeable, OwnableUpgradeable {
         _distributeReferralPayments(msg.sender, msg.value, tokenId);
     }
 
+    /**
+     * @dev Allows a user to buy multiple NFTs in a single transaction
+     * @param _referralCode The referral code to use for the purchase
+     * @param _amount The number of NFTs to buy
+     */
+    function batchBuy(string memory _referralCode, uint256 _amount) external payable {
+        // Ensure amount is valid (greater than 0)
+        require(_amount > 0, "Amount must be greater than 0");
+        
+        // Check if the correct amount of ETH was sent
+        uint256 requiredAmount = price * _amount;
+        if (msg.value != requiredAmount) revert IncorrectEthAmount(msg.value, requiredAmount);
+
+        // Validate referrer
+        address payable referrer = payable(referralCodes[_referralCode]);
+        if (referrer == address(0) || referrer == msg.sender) {
+            revert InvalidReferrer(referrer);
+        }
+
+        // Set the referrer only if it's not already set
+        if (referrers[msg.sender] == address(0)) {
+            referrers[msg.sender] = referrer;
+            emit ReferrerSet(referrer, msg.sender);
+        }
+
+        // Generate and store referral code for the buyer if they don't have one
+        _assignReferralCode(msg.sender);
+
+        // Mint the specified amount of NFTs to the buyer
+        uint256[] memory tokenIds = new uint256[](_amount);
+        for (uint256 i = 0; i < _amount; i++) {
+            tokenIds[i] = _mintSingleNFT(msg.sender);
+        }
+
+        // Distribute referral payments for each NFT
+        // We divide the total payment by the number of NFTs to get the payment per NFT
+        uint256 paymentPerNFT = msg.value / _amount;
+        for (uint256 i = 0; i < _amount; i++) {
+            _distributeReferralPayments(msg.sender, paymentPerNFT, tokenIds[i]);
+        }
+    }
+
     // Function for the owner to withdraw contract balance.
     function withdraw(uint256 _amount) public onlyOwner {
         if (_amount > address(this).balance) revert InsufficientBalance();
