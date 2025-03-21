@@ -45,6 +45,10 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     error InvalidDuration();
     error ReducePositionDisabled();
     error InvalidUserAddress();
+    error PositionNotExpired();
+    error PositionExpired();
+    error InvalidPrice();
+    error PriceOutOfRange();
 
     /**
      * @dev Struct defining reward configuration parameters
@@ -67,6 +71,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
      * @param rewardedAmount Total rewards harvested from this position
      * @param lossAmount Total loss when reducing position at price < entryPrice
      * @param token Currency token used for this position
+     * @param expiredAt Timestamp when position expires (0 if no expiration)
      */
     struct Position {
         uint256 entryPrice;
@@ -78,6 +83,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         uint256 rewardedAmount;
         uint256 lossAmount;
         address token;
+        uint256 expiredAt;
     }
 
     /**
@@ -88,8 +94,9 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
      * @param amount Amount of tokens deposited
      * @param openedAt Timestamp when the position was opened
      * @param currency Address of the currency token used
+     * @param expiredAt Timestamp when position expires (0 if no expiration)
      */
-    event PositionCreated(address indexed user, uint256 indexed tokenId, uint256 entryPrice, uint256 amount, uint256 openedAt, address currency);
+    event PositionCreated(address indexed user, uint256 indexed tokenId, uint256 entryPrice, uint256 amount, uint256 openedAt, address currency, uint256 expiredAt);
 
     /**
      * @dev Emitted when a position is reduced
@@ -133,6 +140,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     event ReduceEnabledUpdated(bool enabled);
     event TotalRewardsUpdated(uint256 oldAmount, uint256 newAmount);
     event TotalRewardsHarvestedUpdated(uint256 oldAmount, uint256 newAmount);
+    event PositionExpirationUpdated(uint256 indexed tokenId, uint256 expiredAt);
 
     // Roles
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
@@ -143,6 +151,8 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     uint256 public constant PERCENTAGE_BASE = 100 * EXPO;
     uint256 public constant BASE_WEIGHT = 10_000;
     uint256 public constant MAX_BATCH_SIZE = 8_000; // Can handle ~760 gas per item
+    uint256 public constant MIN_PRICE_PERCENTAGE = 80; // 80%
+    uint256 public constant MAX_PRICE_PERCENTAGE = 150; // 150%
 
     /**
      * @dev Struct containing price data for batch updates
@@ -400,18 +410,108 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         emit RewardConfigsUpdated();
     }
 
+    /**
+     * @dev Updates expiration time for a position
+     * @param _tokenId ID of the position
+     * @param _expiredAt New expiration timestamp
+     */
+    function setPositionExpiration(uint256 _tokenId, uint256 _expiredAt) external onlyRole(OPERATOR_ROLE) {
+        Position storage position = positions[_tokenId];
+        
+        // Check position is not closed
+        if (position.closedAt != 0) revert PositionAlreadyClosed();
+        
+        position.expiredAt = _expiredAt;
+        emit PositionExpirationUpdated(_tokenId, _expiredAt);
+    }
+
+    /**
+     * @dev Updates expiration time for multiple positions
+     * @param _tokenIds Array of position IDs
+     * @param _expiredAts Array of expiration timestamps
+     */
+    function batchSetPositionExpiration(
+        uint256[] calldata _tokenIds,
+        uint256[] calldata _expiredAts
+    ) external onlyRole(OPERATOR_ROLE) {
+        if (_tokenIds.length != _expiredAts.length) revert("Array lengths must match");
+        if (_tokenIds.length == 0) revert("Empty arrays");
+        if (_tokenIds.length > MAX_BATCH_SIZE) revert("Batch size too large");
+        
+        for (uint256 i = 0; i < _tokenIds.length; i++) {
+            // Use direct logic instead of calling the function to avoid visibility issues
+            Position storage position = positions[_tokenIds[i]];
+            
+            // Check position is not closed
+            if (position.closedAt != 0) revert PositionAlreadyClosed();
+            
+            position.expiredAt = _expiredAts[i];
+            emit PositionExpirationUpdated(_tokenIds[i], _expiredAts[i]);
+        }
+    }
+
+    /**
+     * @dev Allows operators to close expired positions with a specified price
+     * @param _tokenId ID of the expired position to close
+     * @param _providedPrice Price to use for calculations (should be price at expiry time)
+     */
+    function closeExpiredPosition(
+        uint256 _tokenId, 
+        uint256 _providedPrice
+    ) external onlyRole(OPERATOR_ROLE) {
+        Position storage position = positions[_tokenId];
+        
+        // Validate position is expired
+        if (position.expiredAt == 0 || block.timestamp <= position.expiredAt) 
+            revert PositionNotExpired();
+        
+        // Validate position is not already closed
+        if (position.closedAt != 0) 
+            revert PositionAlreadyClosed();
+        
+        // Validate price is not zero
+        if (_providedPrice == 0) 
+            revert InvalidPrice();
+        
+        // Validate price is within fixed range (80%-150%) compared to current price
+        uint256 minPrice = (price * MIN_PRICE_PERCENTAGE) / 100;
+        uint256 maxPrice = (price * MAX_PRICE_PERCENTAGE) / 100;
+        
+        if (_providedPrice < minPrice || _providedPrice > maxPrice)
+            revert PriceOutOfRange();
+        
+        address user = ownerOf(_tokenId);
+        address positionToken = position.token;
+        uint256 remainingAmount = position.remainingAmount;
+        
+        // Reduce the entire position using the provided price
+        uint256 amountToReturn = _reducePositionInternal(
+            _tokenId, 
+            remainingAmount, 
+            _providedPrice, 
+            user,
+            true // Position is being closed due to expiration
+        );
+        
+        // Transfer tokens back to user
+        if (amountToReturn > 0) {
+            IERC20(positionToken).transfer(user, amountToReturn);
+        }
+    }
+
     // ==================== PUBLIC FUNCTIONS ====================
 
     /**
      * @dev Creates a new position with the specified amount and recipient
      * @param _amount Amount of tokens to deposit
      * @param _recipient Address that will receive the position NFT (optional)
+     * @param _expiredAt Timestamp when position expires (0 if no expiration)
      * @return ID of the newly created position
      * Requirements:
      * - Amount must not be zero
      * - Caller must have approved the contract to spend currency tokens
      */
-    function createPosition(uint256 _amount, address _recipient) external returns (uint256) {
+    function createPosition(uint256 _amount, address _recipient, uint256 _expiredAt) external returns (uint256) {
         if (_amount == 0) revert ZeroAmount();
         
         // If recipient is not specified, use msg.sender
@@ -420,7 +520,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         // Transfer tokens from sender to contract
         IERC20(currency).transferFrom(msg.sender, address(this), _amount);
 
-        return _createPosition(recipient, _amount);
+        return _createPosition(recipient, _amount, _expiredAt);
     }
 
     /**
@@ -437,7 +537,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         
         // Get the position's token before reducing
         address positionToken = positions[_tokenId].token;
-        uint256 amountToReturn = _reducePositionInternal(_tokenId, _amount);
+        uint256 amountToReturn = _reducePositionInternal(_tokenId, _amount, price, msg.sender, false);
         
         // Transfer tokens back to user using the position's token
         if (amountToReturn > 0) {
@@ -470,7 +570,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
                 revert("All positions must use the same token for batch processing");
             }
             
-            totalAmountToReturn += _reducePositionInternal(_tokenIds[i], _amounts[i]);
+            totalAmountToReturn += _reducePositionInternal(_tokenIds[i], _amounts[i], price, msg.sender, false);
         }
         
         // Transfer tokens back to user in one transaction
@@ -538,9 +638,10 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
      * @dev Internal function to create a new position
      * @param _user Address that will own the position
      * @param _amount Amount of tokens to deposit
+     * @param _expiredAt Timestamp when position expires (0 if no expiration)
      * @return ID of the newly created position
      */
-    function _createPosition(address _user, uint256 _amount) internal returns (uint256) {
+    function _createPosition(address _user, uint256 _amount, uint256 _expiredAt) internal returns (uint256) {
         // Create new position
         uint256 newTokenId = _nextTokenId++;
 
@@ -554,7 +655,8 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
             closedAt: 0,
             rewardedAmount: 0,
             lossAmount: 0,
-            token: currency // Store the contract's current currency
+            token: currency,
+            expiredAt: _expiredAt
         });
 
         // Update total amount
@@ -564,38 +666,52 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         // Mint NFT
         _mint(_user, newTokenId);
 
-        emit PositionCreated(_user, newTokenId, price, _amount, block.timestamp, currency);
+        emit PositionCreated(_user, newTokenId, price, _amount, block.timestamp, currency, _expiredAt);
         return newTokenId;
     }
 
     /**
      * @dev Internal function to verify position ownership and status
      * @param _tokenId ID of the position to check
+     * @param _ignoreExpiration Whether to ignore expiration check
      * Requirements:
      * - Caller must be owner or approved
      * - Position must not be closed
      */
-    function _checkPositionOwnership(uint256 _tokenId) internal view {
-        if (ownerOf(_tokenId) != msg.sender && getApproved(_tokenId) != msg.sender) revert NotOwnerOrApproved();
-        if (positions[_tokenId].closedAt != 0) revert PositionAlreadyClosed();
+    function _checkPositionOwnership(uint256 _tokenId, bool _ignoreExpiration) internal view {
+        if (ownerOf(_tokenId) != msg.sender && getApproved(_tokenId) != msg.sender && !_ignoreExpiration) 
+            revert NotOwnerOrApproved();
+        if (positions[_tokenId].closedAt != 0) 
+            revert PositionAlreadyClosed();
+        
+        // Check expiration (only if not being handled by operator)
+        if (!_ignoreExpiration && positions[_tokenId].expiredAt != 0 && block.timestamp > positions[_tokenId].expiredAt) 
+            revert PositionExpired();
     }
 
     /**
      * @dev Internal function to calculate and distribute rewards
      * @param _tokenId ID of the position
      * @param _amount Amount being reduced/closed
+     * @param _usePrice Price to use for calculations
+     * @param _recipient Address to send rewards to
      * @return totalReward Total reward calculated
      * @return weight Weight applied to rewards
      * @return userReward Amount sent to user
      * @return treasuryReward Amount sent to treasury
      */
-    function _harvestRewards(uint256 _tokenId, uint256 _amount) internal returns (uint256 totalReward, uint256 weight, uint256 userReward, uint256 treasuryReward) {
+    function _harvestRewards(
+        uint256 _tokenId, 
+        uint256 _amount, 
+        uint256 _usePrice,
+        address _recipient
+    ) internal returns (uint256 totalReward, uint256 weight, uint256 userReward, uint256 treasuryReward) {
         Position storage position = positions[_tokenId];
-        if (price <= position.entryPrice) {
+        if (_usePrice <= position.entryPrice) {
             return (0, 0, 0, 0);
         }
 
-        totalReward = (_amount * (price - position.entryPrice)) / PERCENTAGE_BASE;
+        totalReward = (_amount * (_usePrice - position.entryPrice)) / PERCENTAGE_BASE;
         if (totalReward == 0) {
             return (0, 0, 0, 0);
         }
@@ -617,7 +733,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         uint256 oldHarvestedAmount = totalRewardsHarvested;
         
         if (userReward > 0) {
-            IERC20(rewardToken).transfer(msg.sender, userReward);
+            IERC20(rewardToken).transfer(_recipient, userReward);
         }
         if (treasuryReward > 0 && treasury != address(0)) {
             IERC20(rewardToken).transfer(treasury, treasuryReward);
@@ -651,23 +767,33 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
      * @dev Internal function containing the core logic for reducing a position
      * @param _tokenId ID of the position to reduce
      * @param _amount Amount to reduce
+     * @param _usePrice Price to use for calculations
+     * @param _recipient Address to send rewards to
+     * @param _isExpired Whether the position is being closed due to expiration
      * @return amountToReturn Amount of currency to return to the user
      */
-    function _reducePositionInternal(uint256 _tokenId, uint256 _amount) internal returns (uint256 amountToReturn) {
-        _checkPositionOwnership(_tokenId);
+    function _reducePositionInternal(
+        uint256 _tokenId, 
+        uint256 _amount, 
+        uint256 _usePrice, 
+        address _recipient,
+        bool _isExpired
+    ) internal returns (uint256 amountToReturn) {
+        _checkPositionOwnership(_tokenId, _isExpired);
         Position storage position = positions[_tokenId];
         
         if (_amount == 0) revert ZeroAmount();
         if (_amount > position.remainingAmount) revert InsufficientBalance();
         
         // Calculate and distribute rewards for the reduced amount
-        (uint256 totalReward, uint256 weight, uint256 userReward, uint256 treasuryReward) = _harvestRewards(_tokenId, _amount);
+        (uint256 totalReward, uint256 weight, uint256 userReward, uint256 treasuryReward) = 
+            _harvestRewards(_tokenId, _amount, _usePrice, _recipient);
         
         // Calculate amount to return and loss if price < entryPrice
         amountToReturn = _amount;
         uint256 loss = 0;
-        if (price < position.entryPrice) {
-            uint256 priceDiff = position.entryPrice - price;
+        if (_usePrice < position.entryPrice) {
+            uint256 priceDiff = position.entryPrice - _usePrice;
             loss = (_amount * priceDiff) / PERCENTAGE_BASE;
             position.lossAmount += loss;
             amountToReturn = _amount - loss;
@@ -680,15 +806,30 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         // If reducing to zero, handle like closePosition
         if (_amount == position.remainingAmount) {
             position.closedAt = block.timestamp;
-            position.outPrice = price;
+            position.outPrice = _usePrice;
             position.remainingAmount = 0;
             _burn(_tokenId);
-            _emitPositionReduced(_tokenId, _amount, 0, totalReward, weight, userReward, treasuryReward, position.lossAmount, position.rewardedAmount, loss);
         } else {
             // Update position amount
             position.remainingAmount -= _amount;
-            _emitPositionReduced(_tokenId, _amount, position.remainingAmount, totalReward, weight, userReward, treasuryReward, position.lossAmount, position.rewardedAmount, loss);
         }
+
+        // Emit event with actual price used for this reduction
+        emit PositionReduced(
+            _recipient,
+            _tokenId,
+            _amount,
+            position.remainingAmount,
+            totalReward,
+            weight,
+            userReward,
+            treasuryReward,
+            position.lossAmount,
+            _usePrice,
+            position.rewardedAmount,
+            loss,
+            position.token
+        );
 
         return amountToReturn;
     }
