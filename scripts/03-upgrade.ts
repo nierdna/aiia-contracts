@@ -8,11 +8,11 @@ async function main() {
   const networkName = hre.network.name;
   console.log("Network name:", networkName);
   // Contract name to deploy
-  const contractName = "SeedRoundFundraiser";
+  const contractName = process.env.CONTRACT_NAME!;
 
-  const fundraiserAddress = process.env.FUNDRAISER_ADDRESS!;
-  if (!fundraiserAddress) {
-    console.error("FUNDRAISER_ADDRESS is not set in the .env file");
+  const contractAddress = process.env.CONTRACT_ADDRESS!;
+  if (!contractAddress) {
+    console.error("CONTRACT_ADDRESS is not set in the .env file");
     return;
   }
 
@@ -22,7 +22,7 @@ async function main() {
     formatEther(await deployer.provider.getBalance(deployer.address))
   );
 
-  let proxy: any = fundraiserAddress;
+  let proxy: any = contractAddress;
 
   const oldImplemented = await upgrades.erc1967.getImplementationAddress(proxy);
   const Factory = await ethers.getContractFactory(contractName, deployer);
