@@ -141,6 +141,7 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     event TotalRewardsUpdated(uint256 oldAmount, uint256 newAmount);
     event TotalRewardsHarvestedUpdated(uint256 oldAmount, uint256 newAmount);
     event PositionExpirationUpdated(uint256 indexed tokenId, uint256 expiredAt);
+    event EntryPriceUpdated(uint256 indexed tokenId, uint256 oldEntryPrice, uint256 newEntryPrice);
 
     // Roles
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
@@ -496,6 +497,62 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         // Transfer tokens back to user
         if (amountToReturn > 0) {
             IERC20(positionToken).transfer(user, amountToReturn);
+        }
+    }
+
+    /**
+     * @dev Updates entry price for a position
+     * @param _tokenId ID of the position
+     * @param _newEntryPrice New entry price for the position
+     * Requirements:
+     * - Caller must have OPERATOR_ROLE
+     * - Position must not be closed
+     * - New entry price must not be zero
+     */
+    function updateEntryPrice(uint256 _tokenId, uint256 _newEntryPrice) external onlyRole(OPERATOR_ROLE) {
+        if (_newEntryPrice == 0) revert ZeroPrice();
+        
+        Position storage position = positions[_tokenId];
+        
+        // Check position is not closed
+        if (position.closedAt != 0) revert PositionAlreadyClosed();
+        
+        uint256 oldEntryPrice = position.entryPrice;
+        position.entryPrice = _newEntryPrice;
+        
+        emit EntryPriceUpdated(_tokenId, oldEntryPrice, _newEntryPrice);
+    }
+
+    /**
+     * @dev Updates entry price for multiple positions
+     * @param _tokenIds Array of position IDs
+     * @param _newEntryPrices Array of new entry prices
+     * Requirements:
+     * - Caller must have OPERATOR_ROLE
+     * - Arrays must be of equal length and not empty
+     * - No entry price can be zero
+     * - No position can be closed
+     */
+    function batchUpdateEntryPrice(
+        uint256[] calldata _tokenIds,
+        uint256[] calldata _newEntryPrices
+    ) external onlyRole(OPERATOR_ROLE) {
+        if (_tokenIds.length != _newEntryPrices.length) revert("Array lengths must match");
+        if (_tokenIds.length == 0) revert("Empty arrays");
+        if (_tokenIds.length > MAX_BATCH_SIZE) revert("Batch size too large");
+        
+        for (uint256 i = 0; i < _tokenIds.length; i++) {
+            if (_newEntryPrices[i] == 0) revert ZeroPrice();
+            
+            Position storage position = positions[_tokenIds[i]];
+            
+            // Check position is not closed
+            if (position.closedAt != 0) revert PositionAlreadyClosed();
+            
+            uint256 oldEntryPrice = position.entryPrice;
+            position.entryPrice = _newEntryPrices[i];
+            
+            emit EntryPriceUpdated(_tokenIds[i], oldEntryPrice, _newEntryPrices[i]);
         }
     }
 
