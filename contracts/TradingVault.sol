@@ -142,6 +142,9 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     event TotalRewardsHarvestedUpdated(uint256 oldAmount, uint256 newAmount);
     event PositionExpirationUpdated(uint256 indexed tokenId, uint256 expiredAt);
     event EntryPriceUpdated(uint256 indexed tokenId, uint256 oldEntryPrice, uint256 newEntryPrice);
+    event UserDebtUpdated(address indexed user, uint256 oldDebt, uint256 newDebt);
+    event UserDebtRepaid(address indexed user, uint256 debtAmount, uint256 remainingDebt);
+    event PositionCurrencyUpdated(uint256 indexed tokenId, address oldCurrency, address newCurrency);
 
     // Roles
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
@@ -178,15 +181,21 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     uint256 public totalRewardsAdded;
     /// @dev Total rewards harvested by users
     uint256 public totalRewardsHarvested;
+    
+    // Total debt across all users
+    uint256 public totalUserDebt;
 
     // Storage gap for upgradeable contracts
-    uint256[50] private __gap;
+    uint256[49] private __gap;
 
     // Mappings
     mapping(uint256 => Position) public positions;
 
     // Arrays
     RewardConfig[] public rewardConfigs;
+
+    // Track user debt balances
+    mapping(address => uint256) public userDebt;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -556,6 +565,65 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         }
     }
 
+    /**
+     * @dev Batch updates debt for multiple users
+     * @param _users Array of user addresses
+     * @param _debts Array of debt amounts
+     * Requirements:
+     * - Caller must have OPERATOR_ROLE
+     * - Arrays must be of equal length and not empty
+     * - Each array must not exceed MAX_BATCH_SIZE
+     */
+    function batchUpdateUserDebt(
+        address[] calldata _users,
+        uint256[] calldata _debts
+    ) external onlyRole(OPERATOR_ROLE) {
+        if (_users.length != _debts.length) revert("Array lengths must match");
+        if (_users.length == 0) revert("Empty arrays");
+        if (_users.length > MAX_BATCH_SIZE) revert("Batch size too large");
+        
+        for (uint256 i = 0; i < _users.length; i++) {
+            address user = _users[i];
+            uint256 newDebt = _debts[i];
+            uint256 oldDebt = userDebt[user];
+            
+            _updateUserDebt(user, oldDebt, newDebt);
+        }
+    }
+
+    /**
+     * @dev Batch updates currency of multiple positions
+     * @param _tokenIds Array of position IDs
+     * @param _newCurrencies Array of new currency addresses
+     * Requirements:
+     * - Caller must have OPERATOR_ROLE
+     * - Arrays must be of equal length and not empty
+     * - No currency address can be zero
+     * - No position can be closed
+     */
+    function batchUpdatePositionCurrency(
+        uint256[] calldata _tokenIds,
+        address[] calldata _newCurrencies
+    ) external onlyRole(OPERATOR_ROLE) {
+        if (_tokenIds.length != _newCurrencies.length) revert("Array lengths must match");
+        if (_tokenIds.length == 0) revert("Empty arrays");
+        if (_tokenIds.length > MAX_BATCH_SIZE) revert("Batch size too large");
+        
+        for (uint256 i = 0; i < _tokenIds.length; i++) {
+            if (_newCurrencies[i] == address(0)) revert InvalidCurrencyAddress();
+            
+            Position storage position = positions[_tokenIds[i]];
+            
+            // Check position is not closed
+            if (position.closedAt != 0) revert PositionAlreadyClosed();
+            
+            address oldCurrency = position.token;
+            position.token = _newCurrencies[i];
+            
+            emit PositionCurrencyUpdated(_tokenIds[i], oldCurrency, _newCurrencies[i]);
+        }
+    }
+
     // ==================== PUBLIC FUNCTIONS ====================
 
     /**
@@ -670,6 +738,28 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     }
 
     /**
+     * @dev Allows users to repay their debt using reward tokens
+     * @param _amount Amount of reward tokens to use for debt repayment
+     * Requirements:
+     * - Amount must not be zero
+     * - Amount must not exceed user's debt
+     * - Caller must have approved the contract to spend reward tokens
+     */
+    function repayUserDebt(uint256 _amount) external {
+        if (_amount == 0) revert ZeroAmount();
+        
+        uint256 userDebtAmount = userDebt[msg.sender];
+        if (_amount > userDebtAmount) {
+            _amount = userDebtAmount;
+        }
+        
+        IERC20(rewardToken).transferFrom(msg.sender, address(this), _amount);
+        
+        _updateUserDebt(msg.sender, userDebtAmount, userDebtAmount - _amount);
+        emit UserDebtRepaid(msg.sender, _amount, userDebt[msg.sender]);
+    }
+
+    /**
      * @dev Returns the number of reward configurations
      * @return The length of the rewardConfigs array
      */
@@ -747,6 +837,48 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
     }
 
     /**
+     * @dev Internal function to update user debt
+     * @param _user Address of the user
+     * @param _oldDebt Old debt amount
+     * @param _newDebt New debt amount
+     */
+    function _updateUserDebt(address _user, uint256 _oldDebt, uint256 _newDebt) internal {
+        userDebt[_user] = _newDebt;
+        totalUserDebt = totalUserDebt - _oldDebt + _newDebt;
+        emit UserDebtUpdated(_user, _oldDebt, _newDebt);
+    }
+
+    /**
+     * @dev Internal function to process user debt before harvesting rewards
+     * @param _recipient Address of the reward recipient
+     * @param _totalReward Total reward calculated
+     * @return Remaining reward after debt has been processed
+     */
+    function _processUserDebt(address _recipient, uint256 _totalReward) internal returns (uint256) {
+        uint256 userDebtAmount = userDebt[_recipient];
+        
+        // If user has no debt or no rewards, just return the original amount
+        if (userDebtAmount == 0 || _totalReward == 0) {
+            return _totalReward;
+        }
+        
+        // If total reward can cover all debt
+        if (_totalReward >= userDebtAmount) {
+            // Update user debt to zero
+            _updateUserDebt(_recipient, userDebtAmount, 0);
+            
+            // Return remaining reward after paying debt
+            return _totalReward - userDebtAmount;
+        } else {
+            // Update user debt with remaining amount
+            _updateUserDebt(_recipient, userDebtAmount, userDebtAmount - _totalReward);
+            
+            // All rewards go to debt repayment
+            return 0;
+        }
+    }
+
+    /**
      * @dev Internal function to calculate and distribute rewards
      * @param _tokenId ID of the position
      * @param _amount Amount being reduced/closed
@@ -779,8 +911,11 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         // Get weight based on duration
         weight = _getRewardWeight(duration);
         
-        // Calculate user's share and treasury's share
-        userReward = (totalReward * weight) / BASE_WEIGHT;
+        // Calculate initial user's share without considering debt
+        uint256 initialUserReward = (totalReward * weight) / BASE_WEIGHT;
+        
+        // Process user debt first before distributing rewards
+        userReward = _processUserDebt(_recipient, initialUserReward);
         treasuryReward = totalReward - userReward;
         
         // Update rewarded amount for the proportional amount
@@ -842,10 +977,6 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         if (_amount == 0) revert ZeroAmount();
         if (_amount > position.remainingAmount) revert InsufficientBalance();
         
-        // Calculate and distribute rewards for the reduced amount
-        (uint256 totalReward, uint256 weight, uint256 userReward, uint256 treasuryReward) = 
-            _harvestRewards(_tokenId, _amount, _usePrice, _recipient);
-        
         // Calculate amount to return and loss if price < entryPrice
         amountToReturn = _amount;
         uint256 loss = 0;
@@ -854,7 +985,15 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
             loss = (_amount * priceDiff) / PERCENTAGE_BASE;
             position.lossAmount += loss;
             amountToReturn = _amount - loss;
+            
+            // Increase user debt when loss occurs
+            uint256 currentDebt = userDebt[_recipient];
+            _updateUserDebt(_recipient, currentDebt, currentDebt + loss);
         }
+        
+        // Calculate and distribute rewards for the reduced amount AFTER processing loss
+        (uint256 totalReward, uint256 weight, uint256 userReward, uint256 treasuryReward) = 
+            _harvestRewards(_tokenId, _amount, _usePrice, _recipient);
         
         // Decrease total amount
         totalAmount -= _amount;
@@ -889,52 +1028,5 @@ contract TradingVault is Initializable, ERC721Upgradeable, OwnableUpgradeable, A
         );
 
         return amountToReturn;
-    }
-
-    // ==================== PRIVATE FUNCTIONS ====================
-
-    /**
-     * @dev Helper function to emit PositionReduced event
-     * @param _tokenId ID of the position
-     * @param _reducedAmount Amount reduced
-     * @param _remainingAmount Amount remaining
-     * @param _totalReward Total reward calculated
-     * @param _weight Weight applied
-     * @param _userReward User's reward
-     * @param _treasuryReward Treasury's reward
-     * @param _lossAmount Total loss amount
-     * @param _rewardedAmount Total rewarded amount
-     * @param _loss Loss for this reduction
-     */
-    function _emitPositionReduced(
-        uint256 _tokenId,
-        uint256 _reducedAmount,
-        uint256 _remainingAmount,
-        uint256 _totalReward,
-        uint256 _weight,
-        uint256 _userReward,
-        uint256 _treasuryReward,
-        uint256 _lossAmount,
-        uint256 _rewardedAmount,
-        uint256 _loss
-    ) private {
-        // Get the position's token directly from storage
-        address positionToken = positions[_tokenId].token;
-        
-        emit PositionReduced(
-            msg.sender,
-            _tokenId,
-            _reducedAmount,
-            _remainingAmount,
-            _totalReward,
-            _weight,
-            _userReward,
-            _treasuryReward,
-            _lossAmount,
-            price,
-            _rewardedAmount,
-            _loss,
-            positionToken
-        );
     }
 } 
