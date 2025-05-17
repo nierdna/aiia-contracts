@@ -253,6 +253,18 @@ contract Erc20Staking is
     }
 
     /**
+     * @dev Emergency withdraw a specific amount of staking tokens (only admin can call)
+     * @param _recipient Address to receive the funds
+     * @param _amount Amount of tokens to withdraw
+     */
+    function emergencyWithdrawAmount(address _recipient, uint256 _amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_amount == 0) revert ZeroAmount();
+        uint256 balance = stakingToken.balanceOf(address(this));
+        if (_amount > balance) revert InsufficientContractBalance();
+        stakingToken.safeTransfer(_recipient, _amount);
+    }
+
+    /**
      * @dev Get user's stake and total harvested rewards
      * @param _user Address of the user
      * @return stake User's current stake
@@ -326,7 +338,7 @@ contract Erc20Staking is
         uint256 _deadline,
         bytes calldata _signature
     ) internal returns (bytes32 signatureHash) {
-        if (_amount == 0) revert ZeroAmount();
+        // if (_amount == 0) revert ZeroAmount();
         if (_amount > maxRewardAmount) revert NoRewardAvailable();
         if (block.timestamp > _deadline) revert SignatureExpired();
         
